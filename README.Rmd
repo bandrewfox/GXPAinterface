@@ -100,6 +100,18 @@ rmarkdown::draft("xpress_01234_workflow.Rmd",
 )
 ```
 
+### More Generic Examples
+
+Other examples are provided in the `inst/examples/` folder of the 
+[{GXPAinterface}](https://wfulp.github.io/GXPAinterface/) package source.
+
+ - [Preparing Files for GXPA](inst/examples/local_processing.Rmd)
+ - [Uploading via GXPAinterface](inst/examples/upload_via_interface.Rmd)
+
+You can copy these to your local folder with the `use_example_rmd()` function:
+```{r, eval=FALSE}
+GXPAinterface::use_example_rmd(to = "my_examples_folder", overwrite = FALSE)
+```
 
 ## Installation
 

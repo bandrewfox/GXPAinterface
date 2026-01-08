@@ -1,0 +1,147 @@
+---
+title: "Uploading to GXPA via R interface"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: TRUE
+    toc_float: FALSE
+    highlight: pygment
+    code_folding: hide
+    theme:
+      primary: "#BE2BBB"
+      secondary: "#EEE7E7"
+      success: "#1dce9b"
+      info: "#009fba"
+      warning: "#ffac25"
+      danger: "#df603a"
+params:
+  output_dir_path: "~/output_files"
+  load_session: FALSE
+
+---
+
+```{r setup, results="hide", echo=TRUE, message=FALSE}
+
+# if GXPAinterface is not installed, uncomment and run the following line:
+# install.packages("remotes")
+# remotes::install_github(repo = "wfulp/GXPAinterface")
+# 
+# After you log into the web app, you can get API token 
+# from: https://your_needle_url.com/browse/settings
+#
+# Then, make a ~/.needle file and include these 4 lines.
+# GXPA_SERVER = "https://your_needle_url.com/"
+# GXPA_TOKEN  = "my_user_API_token"
+# GXPA_USERNAME = "my_username"
+# GXPA_PASSWORD = "my_password"
+source("~/.needle")
+Sys.setenv(GXPA_SERVER=GXPA_SERVER)
+Sys.setenv(GXPA_TOKEN=GXPA_TOKEN)
+Sys.setenv(GXPA_USERNAME=GXPA_USERNAME)
+Sys.setenv(GXPA_PASSWORD=GXPA_PASSWORD)
+print(paste("Using GXPA_SERVER:", Sys.getenv("GXPA_SERVER")))
+
+library(GXPAinterface)
+
+```
+
+## Running GXPA::check_files_for_GXPA()
+
+```{r check-files}
+
+check_files_for_GXPA(
+  expr_file = file.path(params$output_dir_path, "expr.expr.txt"),
+  samples_file = file.path(params$output_dir_path, "expr.samples.csv")
+)
+
+```
+
+## Uploading Files
+
+```{r uploading-files}
+# upload all the files
+all_files <- list.files(params$output_dir_path,
+                       full.names = TRUE)
+
+# need specific order for uploading
+first_files <- c("expr.series_info.csv", "expr.samples.csv",
+                 "expr.expr.txt", "expr.score_info.csv")
+upload_files <- c(
+  all_files[match(first_files, basename(all_files))],
+  all_files[!basename(all_files) %in% first_files]
+)
+
+# GXPA session ------------------------------------------------------------
+
+series_info <- read.csv(file.path(params$output_dir_path,
+                                         "expr.series_info.csv"),
+                           stringsAsFactors = FALSE)
+
+# series info is a dataframe with two columns, key and value.
+# I want the row with the name "series_name"
+series_name <- series_info$value[series_info$key == "series_name"]
+
+
+session_name <- str_replace_all(series_name, " ", "_")
+
+user_cookie <- login_and_get_user_cookie()
+
+# make a new session
+message("Making a new session:")
+new_id <- begin_new_session(session_name, user_cookie = user_cookie)
+
+for (f in upload_files) {
+
+  tmp_message <- testthat::capture_message(
+    send_file_to_session(session_id = new_id,
+                         user_cookie = user_cookie,
+                         filename_local = f,
+                         file_save_name = basename(f),
+                         replace=TRUE))
+  if (str_detect(tmp_message$message,
+                 "Successfully uploaded",
+                 negate = TRUE)) {
+    stop(f, " could not be uploaded successfully in session ", session_name)
+  }
+}
+```
+
+## Dry Run and Loading Session (optional)
+
+```{r dry-run}
+# dry run
+message("Running dry_run():")
+dry_run_session(new_id, run_type = "full")
+
+
+
+if (params$load_session) {
+  
+  message("Loading series:")
+  load_session(new_id, load_type = "upload_new")
+  
+  max.loops <- 10
+  done.loading <- FALSE
+  
+  while (!done.loading || max.loops <= 0) {
+    Sys.sleep(5)
+    max.loops <- max.loops - 1
+    # Confirming data has been loaded
+    all_dat <- get_series_info_from_gxpa()
+    
+    if (!any(all_dat$name == str_squish(series_name))) {
+      warning("Could not confirm series was successful, checking again")
+    } else {
+      done.loading <- TRUE
+    }
+  }
+  
+  if (!done.loading) {
+    warning("WARNING: Could not confirm series was successful")
+  } else {
+    message("Confirmed series uploaded to GXPA")
+  }
+  
+}
+
+```

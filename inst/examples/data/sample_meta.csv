@@ -1,0 +1,11 @@
+sample_name,sample_type,disease,gender,drug,donor_id,alive,treatment,timepoint
+GSM50,blood,IPF,M,,GAP0002,no,none,baseline
+GSM51,blood,IPF,F,,GAP0004,yes,none,baseline
+GSM52,blood,IPF,M,,GAP0007,no,none,baseline
+GSM53,blood,IPF,F,,GAP0008,no,none,baseline
+GSM54,blood,IPF,M,,GAP0010,no,none,baseline
+GSM55,blood,IPF,M,,GAP0011,no,steroid,postTx
+GSM56,blood,IPF,F,,GAP0012,no,steroid,postTx
+GSM57,blood,IPF,F,,GAP0013,yes,steroid,postTx
+GSM58,blood,IPF,M,,GAP0017,yes,steroid,postTx
+GSM59,UHR,IPF,M,,GAP0018,no,steroid,postTx
