@@ -12,13 +12,16 @@ params:
   output_dir_path: "~/output_files"
   input_dir_path: "data"
   se_rdata_filename: "expr_SE.Rdata"
-  do_log2_tpm_p1: FALSE
-  remove_list: "list(VSLABL = 'Control', sample_name = 'HuRef', sample_type = 'UHR')"
+  do_log2_tpm_p1: TRUE
+  remove_list: "list(sample_type = 'UHR')"
   gene_symbol_column: "symbol"
   # Optional GXPA metadata
   series_descript: "Description of my dataset"
+  series_default_group: "treatment"
+  series_default_color: "timepoint"
+  series_analyst: "My Name"
   organism: "human"
-  expr_units: "TPM"
+  expr_units: "RNAseq log2(TPM + 1)"
   process_score_files: TRUE
   calc_mean_sd: TRUE
 ---
@@ -122,15 +125,20 @@ col_meta_clean <- as.data.frame(col_meta, stringsAsFactors = FALSE)
 col_meta_clean <- col_meta_clean %>% dplyr::select(-dplyr::matches('^X_id(\\.|$)|^_id$'))
 
 # now add a single `_id` column from the rownames as the first column
-col_meta_clean <- data.frame(`_id` = rownames(col_meta), col_meta_clean, stringsAsFactors = FALSE)
+col_meta_clean <- data.frame(`_id` = rownames(col_meta), col_meta, stringsAsFactors = FALSE, check.names = FALSE)
 
-# remove any column that is identical to the _id column to avoid redundancy
-# (e.g. the original primary key column from step 1)
-redundant_cols <- sapply(col_meta_clean[, -1, drop=FALSE], function(x) all(x == col_meta_clean$`_id`))
+# remove columns that are identical to the _id column (often the original primary key)
+# only remove if it's a character or factor type to be safe
+cols_to_check <- which(sapply(col_meta_clean, function(x) is.character(x) || is.factor(x)))
+cols_to_check <- setdiff(cols_to_check, 1) # don't check _id against itself
+
+redundant_cols <- sapply(cols_to_check, function(i) {
+  all(as.character(col_meta_clean[[i]]) == as.character(col_meta_clean$`_id`))
+})
+
 if (any(redundant_cols)) {
-  col_meta_clean <- col_meta_clean[, c(TRUE, !redundant_cols), drop=FALSE]
+  col_meta_clean <- col_meta_clean[, -cols_to_check[redundant_cols], drop = FALSE]
 }
-
 col_meta <- col_meta_clean
 
 # force first column name to be `_id` to match expected Needle format
@@ -155,11 +163,18 @@ write.table(expr_counts_final,
 # Use any constant columns we moved out of sample metadata as extra info
 extra_info <- if (!is.null(move_to_series)) as.list(move_to_series) else NULL
 
+if (is.null(extra_info)) {
+  extra_info <- list()
+}
+
+extra_info$default_color <- params$series_default_color
+extra_info$analyst <- params$series_analyst
+
 GXPAinterface::make_series_info_file(
   filename = file.path(params$output_dir_path, "expr.series_info.csv"),
   series_name = params$series_name,
   series_descript = params$series_descript %||% params$series_name,
-  default_group = colnames(col_meta)[2], # use first metadata col
+  default_group = params$series_default_group,
   organism = params$organism %||% "human",
   expr_units = params$expr_units %||% "TPM",
   extra.list = extra_info
