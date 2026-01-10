@@ -655,12 +655,13 @@ if (nrow(deg_meta) > 0) {
 
 if(params$calc_mean_sd) {
 
-  tpm_mat <- expr_tpm_symbols %>%
-    dplyr::select(-all_of(c("gene_symbol", gene_id_col_expr_file)))
+  tpm_mat <- expr_tpm_final
 
-  expr_tpm_means <- expr_tpm_symbols %>%
-    dplyr::select(gene_symbol) %>%
-    dplyr::mutate(mean = rowMeans(tpm_mat, na.rm = TRUE)) %>%
+  expr_tpm_means <- data.frame(
+    gene_symbol = rownames(tpm_mat),
+    mean = rowMeans(tpm_mat, na.rm = TRUE),
+    stringsAsFactors = FALSE
+  ) %>%
     dplyr::arrange(desc(mean)) %>%
     dplyr::mutate(rank = seq_len(dplyr::n()))
 
@@ -675,9 +676,11 @@ if(params$calc_mean_sd) {
               sep = "\t", row.names = TRUE, quote = FALSE)
 
 
-  expr_tpm_sd <- expr_tpm_symbols %>%
-    dplyr::select(gene_symbol) %>%
-    dplyr::mutate(stdev = apply(tpm_mat, 1, sd, na.rm = TRUE)) %>%
+  expr_tpm_sd <- data.frame(
+    gene_symbol = rownames(tpm_mat),
+    stdev = apply(tpm_mat, 1, sd, na.rm = TRUE),
+    stringsAsFactors = FALSE
+  ) %>%
     dplyr::arrange(desc(stdev)) %>%
     dplyr::mutate(rank = seq_len(dplyr::n()))
 
