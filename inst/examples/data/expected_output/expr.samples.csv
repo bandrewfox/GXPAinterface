@@ -1,0 +1,10 @@
+_id,gender,donor_id,alive,treatment,timepoint
+GSM50,M,GAP0002,no,none,baseline
+GSM51,F,GAP0004,yes,none,baseline
+GSM52,M,GAP0007,no,none,baseline
+GSM53,F,GAP0008,no,none,baseline
+GSM54,M,GAP0010,no,none,baseline
+GSM55,M,GAP0011,no,steroid,postTx
+GSM56,F,GAP0012,no,steroid,postTx
+GSM57,F,GAP0013,yes,steroid,postTx
+GSM58,M,GAP0017,yes,steroid,postTx

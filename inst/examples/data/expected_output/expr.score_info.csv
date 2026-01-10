@@ -1,0 +1,5 @@
+"name","filename","description","score_type","rank_threshold","score_col","rank_col","group1","group2"
+"stimX-vs-others-logFC","deseq2_stimX_vs_others.txt","deseq, stimulation column: stim_x vs __all_others__ (logFC)","logFC",0,2,8,"stim_x","__all_others__"
+"stimX-vs-others-FDR","deseq2_stimX_vs_others.txt","deseq, stimulation column: stim_x vs __all_others__ (FDR)","FDR",1,6,9,"stim_x","__all_others__"
+"mean","expr_data.mean.txt","mean across all samples","mean",200,1,2,"all",""
+"stdev","expr_data.stdev.txt","stdev across all samples","stdev",200,1,2,"all",""

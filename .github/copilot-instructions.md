@@ -65,6 +65,14 @@ Rscript -e "testthat::test_file('tests/testthat/test-read_GXPA.R')"
 R CMD check .
 ```
 
+# Knit an RMarkdown file (Windows, user-specific)
+To knit an Rmd file using the same R version as your VS Code session (e.g., R 4.2.3), use the full path to Rscript.exe:
+
+```powershell
+& "C:\Program Files\R\R-4.2.3\bin\Rscript.exe" -e "rmarkdown::render('inst/examples/local_processing.Rmd')"
+```
+This ensures the same R environment and user libraries are used as in your interactive session. Adjust the path and file as needed for your setup.
+
 - Use `remotes::install_github('wfulp/GXPAinterface')` for installing the package as users would.
 
 ## Debugging tips (project-specific)

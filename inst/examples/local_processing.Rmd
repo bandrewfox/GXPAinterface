@@ -23,7 +23,7 @@ params:
   series_default_color: "timepoint"
   series_analyst: "My Name"
   output_dir_path: "~/output_files"
-  input_dir_path: "~/input_files"
+  input_dir_path: "data"
   expr_counts_filename: "expr_matrix.counts.txt"
   expr_tpm_filename: "expr_matrix.tpm.txt"
   do_log2_tpm_p1: TRUE
@@ -39,7 +39,7 @@ params:
   load_session: FALSE
 ---
 
-```{r setup, results="hide", echo=TRUE, message=FALSE}
+```{r setup}
 
 library(stringr)
 library(dplyr)
