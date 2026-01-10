@@ -1,0 +1,233 @@
+---
+title: "`r paste0('Build SummarizedExperiment for ', params$series_name)`"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: TRUE
+    toc_float: FALSE
+    highlight: pygment
+    code_folding: hide
+params:
+  series_name: "My Dataset"
+  output_dir_path: "~/output_files"
+  input_dir_path: "data"
+  expr_counts_filename: "expr_matrix.counts.txt"
+  expr_tpm_filename: "expr_matrix.tpm.txt"
+  do_log2_tpm_p1: TRUE
+  sample_meta_filename: "sample_meta.csv"
+  sample_primary_key: "sample_name"
+  remove_list: "list(VSLABL = 'Control', sample_name = 'HuRef', sample_type = 'UHR')"
+  gene_meta_filename: "gene_metadata.csv"
+  gene_id_column.from_gene_meta_file: "ensembl_id"
+  gene_symbol_column.from_gene_meta_file: "symbol"
+  gene_id_column.from_expr_file: "ens_id"
+---
+
+```{r setup}
+library(stringr)
+library(dplyr)
+library(data.table)
+library(readr)
+library(purrr)
+library(SummarizedExperiment)
+
+# Interactive fallback: load params from this RMDs YAML
+if (interactive() && !exists("params")) {
+  fm <- tryCatch(
+    rmarkdown::yaml_front_matter(knitr::current_input()),
+    error = function(e) NULL
+  )
+  if (!is.null(fm) && !is.null(fm$params)) {
+    params <- fm$params
+  }
+}
+```
+
+# Read and validate input files
+
+```{r params}
+# basic checks
+if (is.na(params$series_name)) stop("params$series_name can not be missing")
+if (is.na(params$output_dir_path)) stop("params$output_dir_path can not be missing")
+
+dir.create(params$output_dir_path, recursive = TRUE, showWarnings = FALSE)
+
+# shorten gene mapping vars
+gene_meta_fn <- params$gene_meta_filename
+gene_id_col_meta_file <- params$gene_id_column.from_gene_meta_file
+gene_symbol_col_meta_file <- params$gene_symbol_column.from_gene_meta_file
+gene_id_col_expr_file <- params$gene_id_column.from_expr_file
+```
+
+## Confirm files exist
+
+```{r confirm-files}
+input_dir <- params$input_dir_path
+expr_counts_file_path <- file.path(input_dir, params$expr_counts_filename)
+expr_tpm_file_path <- file.path(input_dir, params$expr_tpm_filename)
+sample_meta_file_path <- file.path(input_dir, params$sample_meta_filename)
+
+if (!dir.exists(input_dir)) stop("Input directory does not exist: ", input_dir)
+if (!file.exists(expr_counts_file_path)) stop("Expression counts file does not exist: ", expr_counts_file_path)
+if (!file.exists(expr_tpm_file_path)) stop("Expression TPM file does not exist: ", expr_tpm_file_path)
+if (!file.exists(sample_meta_file_path)) stop("Samples file does not exist: ", sample_meta_file_path)
+if (!file.exists(file.path(input_dir, gene_meta_fn))) stop("Gene metadata file not found: ", gene_meta_fn)
+```
+
+## Sample metadata cleaning
+
+```{r samples}
+# read samples
+samples <- read.csv(sample_meta_file_path, stringsAsFactors = FALSE)
+if (!(params$sample_primary_key %in% colnames(samples))) stop("Sample primary key column not found in samples file: ", params$sample_primary_key)
+
+# apply remove_list if present
+if (!is.null(params$remove_list)) {
+  remove_list <- eval(parse(text = params$remove_list))
+  remove_ids <- purrr::imap(remove_list, function(x, idx) {
+    if (any(colnames(samples) == idx)) {
+      samples[[params$sample_primary_key]][samples[[idx]] %in% x]
+    }
+  }) %>% unlist()
+} else {
+  remove_ids <- character()
+}
+
+keep_ids <- setdiff(samples[[params$sample_primary_key]], remove_ids)
+samples <- samples[samples[[params$sample_primary_key]] %in% keep_ids, ]
+
+# rename primary key to _id and move first
+colnames(samples)[colnames(samples) == params$sample_primary_key] <- "_id"
+samples <- samples %>% dplyr::select("_id", dplyr::everything())
+
+# drop empty/NA columns
+samples <- samples %>% dplyr::select(where(~ !all(is.na(.x) | .x %in% c("\"NA\"", ""))))
+
+# move constant columns into series-level metadata
+cols_to_move <- as.logical(purrr::map_dbl(samples, ~ length(unique(.x))) == 1)
+if (any(cols_to_move)) {
+  move_to_series <- samples[, cols_to_move, drop = FALSE] %>% unique()
+  samples <- samples %>% dplyr::select(!all_of(colnames(move_to_series)))
+} else {
+  move_to_series <- NULL
+}
+
+# write a samples file (modified) for reference
+write_csv(samples, file = file.path(params$output_dir_path, "expr.samples.csv"))
+```
+
+## Read expression matrices
+
+```{r read-expr}
+expr_counts <- read.delim(expr_counts_file_path, stringsAsFactors = FALSE, check.names = FALSE)
+expr_tpm <- read.delim(expr_tpm_file_path, stringsAsFactors = FALSE, check.names = FALSE)
+
+# ensure gene id column present
+if (!gene_id_col_expr_file %in% colnames(expr_counts)) stop(paste("gene_id_col_expr_file:", gene_id_col_expr_file, "not found in expr_counts columns"))
+if (!gene_id_col_expr_file %in% colnames(expr_tpm)) stop(paste("gene_id_col_expr_file:", gene_id_col_expr_file, "not found in expr_tpm columns"))
+
+if (!all(colnames(expr_counts) == colnames(expr_tpm))) stop("Column names of expr_counts and expr_tpm do not match")
+```
+
+## Gene metadata and adding symbols
+
+```{r feat}
+gene_meta <- read.csv(file.path(input_dir, gene_meta_fn), stringsAsFactors = FALSE)
+if (!gene_id_col_meta_file %in% colnames(gene_meta)) stop(paste("gene_id_col_meta_file:", gene_id_col_meta_file, "not found in gene_meta columns"))
+if (!gene_symbol_col_meta_file %in% colnames(gene_meta)) stop(paste("gene_symbol_col_meta_file:", gene_symbol_col_meta_file, "not found in gene_meta columns"))
+
+feat <- gene_meta %>% dplyr::select(all_of(c(gene_id_col_meta_file, gene_symbol_col_meta_file)))
+colnames(feat) <- c("gene_id", "gene_symbol")
+
+# check mapping coverage
+num_missing_gene_ids_from_counts <- sum(!feat$gene_id %in% expr_counts[[gene_id_col_expr_file]])
+num_missing_gene_ids_from_tpm <- sum(!feat$gene_id %in% expr_tpm[[gene_id_col_expr_file]])
+
+if (num_missing_gene_ids_from_counts / nrow(feat) > 0.2) stop("More than 20% of gene ids in metadata are missing from expr_counts")
+if (num_missing_gene_ids_from_tpm / nrow(feat) > 0.2) stop("More than 20% of gene ids in metadata are missing from expr_tpm")
+
+# join symbols into expression tables
+expr_counts <- expr_counts %>% dplyr::left_join(feat, by = setNames("gene_id", gene_id_col_expr_file))
+expr_tpm <- expr_tpm %>% dplyr::left_join(feat, by = setNames("gene_id", gene_id_col_expr_file))
+```
+
+## Keep highest-TPM symbol per gene and align with samples
+
+```{r dedup}
+expr_tpm_symbols <- expr_tpm %>%
+  dplyr::arrange(desc(rowMeans(dplyr::select(., -all_of(c(gene_id_col_expr_file, "gene_symbol")))))) %>%
+  dplyr::distinct(gene_symbol, .keep_all = TRUE)
+
+gene_ids_to_keep <- expr_tpm_symbols[[gene_id_col_expr_file]]
+
+expr_counts_symbols <- expr_counts %>% dplyr::filter(!!rlang::sym(gene_id_col_expr_file) %in% gene_ids_to_keep)
+
+# move symbol to rownames and drop id/symbol columns
+expr_tpm_final <- expr_tpm_symbols
+expr_counts_final <- expr_counts_symbols
+rownames(expr_tpm_final) <- expr_tpm_symbols$gene_symbol
+rownames(expr_counts_final) <- expr_counts_symbols$gene_symbol
+expr_tpm_final <- expr_tpm_final %>% dplyr::select(-all_of(c(gene_id_col_expr_file, "gene_symbol")))
+expr_counts_final <- expr_counts_final %>% dplyr::select(-all_of(c(gene_id_col_expr_file, "gene_symbol")))
+
+if (params$do_log2_tpm_p1) {
+  expr_tpm_final <- round(log2(expr_tpm_final + 1), 5)
+}
+
+# preserve raw TPM prior to any transform for mean/stdev calculations
+tpm_raw <- expr_tpm_symbols %>%
+  dplyr::select(-all_of(c(gene_id_col_expr_file, "gene_symbol")))
+
+# if we applied log transform above, `expr_tpm_final` holds transformed values
+# otherwise it equals `tpm_raw` already
+
+# restrict to samples present and match order
+expr_tpm_final <- expr_tpm_final[, match(samples$`_id`, colnames(expr_tpm_final))]
+expr_counts_final <- expr_counts_final[, match(samples$`_id`, colnames(expr_counts_final))]
+
+# align tpm_raw to same row/column structure
+rownames(tpm_raw) <- expr_tpm_symbols$gene_symbol
+tpm_raw <- tpm_raw[, match(samples$`_id`, colnames(tpm_raw))]
+
+if (ncol(expr_tpm_final) != nrow(samples)) stop("Number of columns in expr_tpm_final does not match number of rows in samples")
+if (ncol(expr_counts_final) != nrow(samples)) stop("Number of columns in expr_counts_final does not match number of rows in samples")
+```
+
+## Build SummarizedExperiment and save
+
+```{r build-se}
+# prepare rowData and colData
+row_df <- data.frame(gene_symbol = rownames(expr_tpm_final), stringsAsFactors = FALSE)
+# attempt to preserve original gene_id mapping
+row_df$gene_id <- expr_tpm_symbols[[gene_id_col_expr_file]]
+rownames(row_df) <- row_df$gene_symbol
+
+col_df <- samples
+rownames(col_df) <- col_df$`_id`
+
+if (params$do_log2_tpm_p1) {
+  assays_list <- list(
+    tpm = as.matrix(expr_tpm_final),    # transformed TPM (log2)
+    tpm_raw = as.matrix(tpm_raw),       # raw TPM for mean/stdev
+    counts = as.matrix(expr_counts_final)
+  )
+} else {
+  assays_list <- list(
+    tpm = as.matrix(expr_tpm_final),    # raw TPM
+    counts = as.matrix(expr_counts_final)
+  )
+}
+
+se <- SummarizedExperiment(assays = assays_list, rowData = row_df, colData = col_df)
+
+save(se, file = file.path(params$output_dir_path, "expr_SE.Rdata"))
+
+message("Saved SummarizedExperiment to: ", file.path(params$output_dir_path, "expr_SE.Rdata"))
+```
+
+# Done
+
+Files written to `r params$output_dir_path`:
+
+- `r file.path(params$output_dir_path, "expr_SE.Rdata")`
+- `r file.path(params$output_dir_path, "expr.samples.csv")`

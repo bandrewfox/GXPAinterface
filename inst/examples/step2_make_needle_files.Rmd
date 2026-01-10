@@ -1,0 +1,288 @@
+---
+title: "`r paste0('Create Needle files from SE for ', params$series_name)`"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: TRUE
+    toc_float: FALSE
+    highlight: pygment
+    code_folding: hide
+params:
+  series_name: "My Dataset"
+  output_dir_path: "~/output_files"
+  input_dir_path: "data"
+  se_rdata_filename: "expr_SE.Rdata"
+  process_score_files: TRUE
+  calc_mean_sd: TRUE
+---
+
+```{r setup}
+library(dplyr)
+library(readr)
+library(purrr)
+library(data.table)
+library(DT)
+library(SummarizedExperiment)
+
+# Interactive fallback: load params from this RMDs YAML
+if (interactive() && !exists("params")) {
+  fm <- tryCatch(
+    rmarkdown::yaml_front_matter(knitr::current_input()),
+    error = function(e) NULL
+  )
+  if (!is.null(fm) && !is.null(fm$params)) {
+    params <- fm$params
+  }
+}
+```
+
+## Load the saved SummarizedExperiment
+
+```{r load-se}
+se_path <- file.path(params$output_dir_path, params$se_rdata_filename)
+if (!file.exists(se_path)) stop("SE Rdata not found: ", se_path)
+load(se_path) # expects object named `se`
+if (!exists("se")) stop("Loaded file did not contain object named 'se'")
+
+# extract matrices and metadata
+expr_tpm_final <- as.data.frame(assay(se, "tpm"))
+expr_counts_final <- as.data.frame(assay(se, "counts"))
+row_meta <- as.data.frame(rowData(se))
+col_meta <- as.data.frame(colData(se))
+
+# ensure rownames are gene symbols
+if (is.null(rownames(expr_tpm_final))) stop("expr TPM matrix has no rownames")
+if (is.null(rownames(expr_counts_final))) stop("expr counts matrix has no rownames")
+
+# ensure `_id` column exists (convert rownames to `_id` if necessary)
+## create a clean `_id` column from rownames and remove any auto-generated duplicates
+orig_col_meta <- as.data.frame(col_meta, stringsAsFactors = FALSE)
+# remove any existing duplicated id-like columns (e.g., X_id, X_id.1, or existing _id)
+orig_col_meta <- orig_col_meta %>% dplyr::select(-dplyr::matches('^X_id(\\.|$)|^_id$'))
+
+# now add a single `_id` column from the rownames as the first column
+col_meta_clean <- data.frame(`_id` = rownames(col_meta), orig_col_meta, stringsAsFactors = FALSE)
+col_meta <- col_meta_clean
+
+# force first column name to be `_id` to match expected Needle format
+names(col_meta)[1] <- "_id"
+
+# write out sample metadata (colData) as expr.samples.csv
+write.table(col_meta, file = file.path(params$output_dir_path, "expr.samples.csv"), sep = ",", row.names = FALSE, quote = FALSE)
+
+# write expression matrices (TPM and counts)
+write.table(expr_tpm_final,
+            file = file.path(params$output_dir_path, "expr.expr.txt"),
+            sep = "\t", row.names = TRUE, quote = FALSE)
+
+write.table(expr_counts_final,
+            file = file.path(params$output_dir_path, "expr.expr_counts.txt"),
+            sep = "\t", row.names = TRUE, quote = FALSE)
+```
+
+## DEG score file metadata (enter as R code here)
+
+```{r deg_meta_params}
+# build deg_meta one row at a time with explicit column names
+deg_meta <- data.frame(
+  score_file_name = character(),
+  name = character(),
+  description = character(),
+  logfc_column = character(),
+  fdr_column = integer(),
+  group1 = character(),
+  group2 = character(),
+  stringsAsFactors = FALSE
+)
+
+if (params$process_score_files) {
+  score_thresholds <- list(logFC = 1, FDR = 0.05)
+
+  # example: adjust to your files in params$input_dir_path
+  deg_meta[nrow(deg_meta) + 1, ] <- list(
+    score_file_name = "deseq2_stimX_vs_others.txt",
+    name = "stimX-vs-others",
+    description = "deseq, stimulation column: stim_x vs __all_others__",
+    logfc_column = "logFC",
+    fdr_column = "adj.P.Val",
+    group1 = "stim_x",
+    group2 = "__all_others__"
+  )
+}
+```
+
+## Read and modify DEG score files (using SE rowData mapping)
+
+```{r read-score-files}
+# prepare mapping from gene_id -> gene_symbol using row_meta
+if (!("gene_id" %in% colnames(row_meta)) || !("gene_symbol" %in% colnames(row_meta))) {
+  # try to recover if gene_id was stored under a different name
+  if ("gene_symbol" %in% colnames(row_meta)) {
+    row_meta$gene_id <- ifelse(!is.null(row_meta$gene_id), row_meta$gene_id, NA)
+  } else {
+    stop("rowData(se) must contain at least gene_symbol (and ideally gene_id)")
+  }
+}
+
+feat <- row_meta %>% dplyr::select(gene_id, gene_symbol)
+rownames(feat) <- feat$gene_symbol
+
+# gene ids to keep (from SE)
+gene_ids_to_keep <- feat$gene_id
+
+# initialize score_info_file dataframe
+score_info_file <- data.frame(
+  name = character(),
+  filename = character(),
+  description = character(),
+  score_type = character(),
+  rank_threshold = integer(),
+  score_col = integer(),
+  rank_col = integer(),
+  group1 = character(),
+  group2 = character(),
+  stringsAsFactors = FALSE
+)
+
+if (nrow(deg_meta) > 0) {
+  for (i in 1:nrow(deg_meta)) {
+    score_file_path <- file.path(params$input_dir_path, deg_meta$score_file_name[i])
+    if (!file.exists(score_file_path)) stop("Score file does not exist: ", score_file_path)
+
+    score_data <- read.delim(score_file_path, stringsAsFactors = FALSE, check.names = FALSE)
+    colnames(score_data)[1] <- "gene_id"
+
+    frac_found <- sum(gene_ids_to_keep %in% score_data$gene_id)/nrow(score_data)
+    if (frac_found < 0.2) stop(paste("many expected gene_ids missing in score file, are the gene_ids in the first column?", score_file_path))
+
+    score_data <- score_data %>% dplyr::filter(!!rlang::sym("gene_id") %in% gene_ids_to_keep)
+
+    score_data <- score_data %>% dplyr::mutate(
+      logFC_rank = rank(-abs(.data[[deg_meta$logfc_column[i]]]), ties.method = "first", na.last = "keep"),
+      FDR_rank   = rank(.data[[deg_meta$fdr_column[i]]], ties.method = "first", na.last = "keep")
+    )
+
+    score_data <- score_data %>% dplyr::left_join(feat, by = setNames("gene_id", "gene_id"))
+    rownames(score_data) <- score_data$gene_symbol
+    score_data <- score_data %>% dplyr::select(-gene_symbol)
+
+    logfc_col_idx <- which(colnames(score_data) == deg_meta$logfc_column[i])
+    fdr_col_idx <- which(colnames(score_data) == deg_meta$fdr_column[i])
+    logfc_rank_col_idx <- which(colnames(score_data) == "logFC_rank")
+    fdr_rank_col_idx <- which(colnames(score_data) == "FDR_rank")
+
+    logfc_info_row <- data.frame(
+      name = paste0(deg_meta$name[i], "-logFC"),
+      filename = deg_meta$score_file_name[i],
+      description = paste0(deg_meta$description[i], " (logFC)"),
+      score_type = "logFC",
+      rank_threshold = min(sum(abs(score_data[[deg_meta$logfc_column[i]]]) >= score_thresholds$logFC), 5),
+      score_col = logfc_col_idx,
+      rank_col = logfc_rank_col_idx,
+      group1 = deg_meta$group1[i],
+      group2 = deg_meta$group2[i],
+      stringsAsFactors = FALSE
+    )
+
+    fdr_info_row <- data.frame(
+      name = paste0(deg_meta$name[i], "-FDR"),
+      filename = deg_meta$score_file_name[i],
+      description = paste0(deg_meta$description[i], " (FDR)"),
+      score_type = "FDR",
+      rank_threshold = min(sum(score_data[[deg_meta$fdr_column[i]]] <= score_thresholds$FDR), 5),
+      score_col = fdr_col_idx,
+      rank_col = fdr_rank_col_idx,
+      group1 = deg_meta$group1[i],
+      group2 = deg_meta$group2[i],
+      stringsAsFactors = FALSE
+    )
+
+    score_info_file <- rbind(score_info_file, logfc_info_row, fdr_info_row)
+
+    new_file_path <- file.path(params$output_dir_path, deg_meta$score_file_name[i])
+    deg_meta$output_file_path[i] <- new_file_path
+    write.table(score_data, file = new_file_path, sep = "\t", row.names = TRUE, quote = FALSE)
+  }
+}
+```
+
+## Calc mean and stdev, if requested
+
+```{r mean-sd}
+if (params$calc_mean_sd) {
+  # Prefer raw TPM from the SE if available (assay `tpm_raw`).
+  # If not present, fall back to reading the original TPM input file
+  if ("tpm_raw" %in% names(SummarizedExperiment::assays(se))) {
+    tpm_mat <- as.data.frame(assay(se, "tpm_raw"))
+  } else {
+    # attempt to read TPM input file from params$input_dir_path
+    tpm_input_path <- file.path(params$input_dir_path, 'expr_matrix.tpm.txt')
+    if (!file.exists(tpm_input_path)) {
+      stop('Cannot compute mean/stdev: raw TPM not present in SE and input TPM file not found: ', tpm_input_path)
+    }
+    tpm_input <- read.delim(tpm_input_path, stringsAsFactors = FALSE, check.names = FALSE)
+    # assume first column is gene id and join to row_meta mapping
+    gene_id_col_expr_file <- colnames(tpm_input)[1]
+    tpm_input <- tpm_input %>% dplyr::left_join(row_meta %>% dplyr::select(gene_id, gene_symbol), by = setNames('gene_id', gene_id_col_expr_file))
+    tpm_processed <- tpm_input %>% dplyr::arrange(desc(rowMeans(dplyr::select(., -all_of(c(gene_id_col_expr_file, 'gene_symbol')))))) %>%
+      dplyr::distinct(gene_symbol, .keep_all = TRUE) %>%
+      dplyr::select(-all_of(c('gene_symbol', gene_id_col_expr_file)))
+    rownames(tpm_processed) <- tpm_input %>% dplyr::arrange(desc(rowMeans(dplyr::select(., -all_of(c(gene_id_col_expr_file, 'gene_symbol')))))) %>%
+      dplyr::distinct(gene_symbol, .keep_all = TRUE) %>%
+      dplyr::pull(gene_symbol)
+    tpm_mat <- as.data.frame(tpm_processed)
+  }
+
+  expr_tpm_means <- data.frame(
+    gene_symbol = rownames(tpm_mat),
+    mean = rowMeans(tpm_mat, na.rm = TRUE),
+    stringsAsFactors = FALSE
+  ) %>% dplyr::arrange(desc(mean)) %>% dplyr::mutate(rank = seq_len(n()))
+
+  rownames(expr_tpm_means) <- expr_tpm_means$gene_symbol
+  expr_tpm_means <- expr_tpm_means %>% dplyr::select(-gene_symbol)
+  expr_tpm_means$mean <- round(expr_tpm_means$mean, 4)
+
+  write.table(expr_tpm_means, file = file.path(params$output_dir_path, "expr_data.mean.txt"), sep = "\t", row.names = TRUE, quote = FALSE)
+
+  expr_tpm_sd <- data.frame(
+    gene_symbol = rownames(tpm_mat),
+    stdev = apply(tpm_mat, 1, sd, na.rm = TRUE),
+    stringsAsFactors = FALSE
+  ) %>% dplyr::arrange(desc(stdev)) %>% dplyr::mutate(rank = seq_len(n()))
+
+  rownames(expr_tpm_sd) <- expr_tpm_sd$gene_symbol
+  expr_tpm_sd <- expr_tpm_sd %>% dplyr::select(-gene_symbol)
+  expr_tpm_sd$stdev <- round(expr_tpm_sd$stdev, 4)
+
+  write.table(expr_tpm_sd, file = file.path(params$output_dir_path, "expr_data.stdev.txt"), sep = "\t", row.names = TRUE, quote = FALSE)
+
+  score_info_file_mean_sd <- data.frame(
+    name = c("mean", "stdev"),
+    filename = c("expr_data.mean.txt", "expr_data.stdev.txt"),
+    description = c("mean across all samples", "stdev across all samples"),
+    score_type = c("mean", "stdev"),
+    rank_threshold = 200,
+    score_col = 1,
+    rank_col = 2,
+    group1 = "all",
+    group2 = "",
+    stringsAsFactors = FALSE
+  )
+  score_info_file <- rbind(score_info_file, score_info_file_mean_sd)
+}
+
+if (nrow(score_info_file) > 0) {
+  write.csv(score_info_file, file = file.path(params$output_dir_path, "expr.score_info.csv"), row.names = FALSE)
+}
+```
+
+Files written to `r params$output_dir_path`:
+
+- `r file.path(params$output_dir_path, "expr.samples.csv")`
+- `r file.path(params$output_dir_path, "expr.expr.txt")`
+- `r file.path(params$output_dir_path, "expr.expr_counts.txt")`
+- `r if (params$calc_mean_sd) { file.path(params$output_dir_path, "expr_data.mean.txt") } else { "mean file not generated" }`
+- `r if (params$calc_mean_sd) { file.path(params$output_dir_path, "expr_data.stdev.txt") } else { "stdev file not generated" }`
+- `r if (nrow(deg_meta) > 0) { paste0(deg_meta$output_file_path, collapse = ", ") } else { "no score files generated" }`
+- `r if (nrow(score_info_file) > 0) { file.path(params$output_dir_path, "expr.score_info.csv") } else { "score info file not generated" }`
