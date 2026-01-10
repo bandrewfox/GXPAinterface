@@ -14,12 +14,47 @@ expected_files <- list.files(expected_dir, full.names = TRUE)
 # Only compare files with the same name in both dirs
 common_files <- intersect(basename(output_files), basename(expected_files))
 
+# Helper: try reading as data.frame, else NULL
+try_read_table <- function(path) {
+  tryCatch({
+    read.table(path, header = TRUE, sep = "\t", stringsAsFactors = FALSE, check.names = FALSE)
+  }, error = function(e) NULL)
+}
+
+# Compare two tabular files for identical, diff_order, diff_content, diff_shape
+compare_tabular_files <- function(file1, file2) {
+  df1 <- try_read_table(file1)
+  df2 <- try_read_table(file2)
+  if (is.null(df1) || is.null(df2)) return(NA)
+  if (!all(dim(df1) == dim(df2))) return("diff_shape")
+  if (identical(df1, df2)) return("identical")
+  # Check for same rows and counts, but different order
+  if (all(table(apply(df1, 1, paste, collapse = "\r")) == table(apply(df2, 1, paste, collapse = "\r")))) {
+    return("diff_order")
+  }
+  return("diff_content")
+}
+
 if (length(common_files) == 0) {
   cat('No matching files to compare.\n')
 } else {
   for (fname in common_files) {
     out_path <- file.path(output_dir, fname)
     exp_path <- file.path(expected_dir, fname)
+    cmp <- compare_tabular_files(out_path, exp_path)
+    if (!is.na(cmp)) {
+      if (cmp == "identical") {
+        cat(sprintf('MATCH: %s (tabular, identical)\n', fname))
+      } else if (cmp == "diff_order") {
+        cat(sprintf('DIFF_ORDER: %s (tabular, same rows, different order)\n', fname))
+      } else if (cmp == "diff_shape") {
+        cat(sprintf('DIFFER: %s\n  Reason: tabular files have different shape\n', fname))
+      } else if (cmp == "diff_content") {
+        cat(sprintf('DIFFER: %s\n  Reason: tabular files differ in content\n', fname))
+      }
+      next
+    }
+    # Fallback: original line-by-line logic for non-tabular files
     out_lines <- readLines(out_path, warn = FALSE)
     exp_lines <- readLines(exp_path, warn = FALSE)
     n_out <- length(out_lines)
@@ -57,5 +92,4 @@ if (length(common_files) == 0) {
   if (length(missing_in_expected) > 0) {
     cat('Missing in expected_output:', paste(missing_in_expected, collapse=', '), '\n')
   }
-
 }
