@@ -12,6 +12,13 @@ params:
   output_dir_path: "~/output_files"
   input_dir_path: "data"
   se_rdata_filename: "expr_SE.Rdata"
+  do_log2_tpm_p1: FALSE
+  remove_list: "list(VSLABL = 'Control', sample_name = 'HuRef', sample_type = 'UHR')"
+  gene_symbol_column: "symbol"
+  # Optional GXPA metadata
+  series_descript: "Description of my dataset"
+  organism: "human"
+  expr_units: "TPM"
   process_score_files: TRUE
   calc_mean_sd: TRUE
 ---
@@ -23,6 +30,7 @@ library(purrr)
 library(data.table)
 library(DT)
 library(SummarizedExperiment)
+library(GXPAinterface)
 
 # Interactive fallback: load params from this RMDs YAML
 if (interactive() && !exists("params")) {
@@ -36,7 +44,7 @@ if (interactive() && !exists("params")) {
 }
 ```
 
-## Load the saved SummarizedExperiment
+## Load the saved SummarizedExperiment and switch to Gene Symbols
 
 ```{r load-se}
 se_path <- file.path(params$output_dir_path, params$se_rdata_filename)
@@ -44,24 +52,85 @@ if (!file.exists(se_path)) stop("SE Rdata not found: ", se_path)
 load(se_path) # expects object named `se`
 if (!exists("se")) stop("Loaded file did not contain object named 'se'")
 
-# extract matrices and metadata
-expr_tpm_final <- as.data.frame(assay(se, "tpm"))
-expr_counts_final <- as.data.frame(assay(se, "counts"))
-row_meta <- as.data.frame(rowData(se))
-col_meta <- as.data.frame(colData(se))
+# apply remove_list if present
+if (!is.null(params$remove_list)) {
+  remove_list <- eval(parse(text = params$remove_list))
+  # Use colData to find IDs to remove
+  col_meta_df <- as.data.frame(colData(se))
+  remove_ids <- purrr::imap(remove_list, function(x, idx) {
+    if (any(colnames(col_meta_df) == idx)) {
+      # Use rownames as the sample IDs since _id rename hasn't happened yet
+      rownames(col_meta_df)[col_meta_df[[idx]] %in% x]
+    }
+  }) %>% unlist()
+  
+  if (length(remove_ids) > 0) {
+    se <- se[, !(colnames(se) %in% remove_ids)]
+  }
+}
 
-# ensure rownames are gene symbols
-if (is.null(rownames(expr_tpm_final))) stop("expr TPM matrix has no rownames")
-if (is.null(rownames(expr_counts_final))) stop("expr counts matrix has no rownames")
+# move constant columns into series-level metadata
+col_meta_df <- as.data.frame(colData(se))
+cols_to_move <- as.logical(purrr::map_dbl(col_meta_df, ~ length(unique(.x))) == 1)
+if (any(cols_to_move)) {
+  move_to_series <- col_meta_df[, cols_to_move, drop = FALSE] %>% unique()
+  # Remove from colData
+  colData(se) <- colData(se)[, !cols_to_move, drop = FALSE]
+} else {
+  move_to_series <- NULL
+}
 
-# ensure `_id` column exists (convert rownames to `_id` if necessary)
-## create a clean `_id` column from rownames and remove any auto-generated duplicates
-orig_col_meta <- as.data.frame(col_meta, stringsAsFactors = FALSE)
+# Switch to symbol: Keep the row with highest mean expression per symbol
+row_meta_full <- as.data.frame(rowData(se))
+symbol_col <- params$gene_symbol_column
+if (!symbol_col %in% colnames(row_meta_full)) stop(paste("rowData(se) must contain symbol column:", symbol_col))
+
+# Create a clear gene_symbol column for downstream code
+row_meta_full$gene_symbol <- row_meta_full[[symbol_col]]
+
+# Calculate means to decide which gene_id to keep for each symbol
+# Use 'tpm' assay (which is raw from Step 1)
+row_means <- rowMeans(assay(se, "tpm"))
+row_meta_full$mean_for_dedup <- row_means
+
+best_ids <- row_meta_full %>%
+  dplyr::arrange(desc(mean_for_dedup)) %>%
+  dplyr::distinct(gene_symbol, .keep_all = TRUE) %>%
+  dplyr::pull(gene_id)
+
+se_symbols <- se[best_ids, ]
+rownames(se_symbols) <- rowData(se_symbols)[[symbol_col]]
+
+# Now perform log2 transform if requested
+if (params$do_log2_tpm_p1) {
+  # Save raw for mean/sd later if needed, but the main 'tpm' assay will be log2
+  assay(se_symbols, "tpm_raw") <- assay(se_symbols, "tpm")
+  assay(se_symbols, "tpm") <- round(log2(assay(se_symbols, "tpm") + 1), 5)
+}
+
+# extract matrices and metadata for output
+expr_tpm_final <- as.data.frame(assay(se_symbols, "tpm"))
+expr_counts_final <- as.data.frame(assay(se_symbols, "counts"))
+row_meta <- as.data.frame(rowData(se_symbols))
+# Ensure gene_symbol is consistently available in row_meta
+row_meta$gene_symbol <- row_meta[[symbol_col]]
+col_meta <- as.data.frame(colData(se_symbols))
+
+# ensure `_id` column exists in col_meta (convert rownames to `_id` if necessary)
+col_meta_clean <- as.data.frame(col_meta, stringsAsFactors = FALSE)
 # remove any existing duplicated id-like columns (e.g., X_id, X_id.1, or existing _id)
-orig_col_meta <- orig_col_meta %>% dplyr::select(-dplyr::matches('^X_id(\\.|$)|^_id$'))
+col_meta_clean <- col_meta_clean %>% dplyr::select(-dplyr::matches('^X_id(\\.|$)|^_id$'))
 
 # now add a single `_id` column from the rownames as the first column
-col_meta_clean <- data.frame(`_id` = rownames(col_meta), orig_col_meta, stringsAsFactors = FALSE)
+col_meta_clean <- data.frame(`_id` = rownames(col_meta), col_meta_clean, stringsAsFactors = FALSE)
+
+# remove any column that is identical to the _id column to avoid redundancy
+# (e.g. the original primary key column from step 1)
+redundant_cols <- sapply(col_meta_clean[, -1, drop=FALSE], function(x) all(x == col_meta_clean$`_id`))
+if (any(redundant_cols)) {
+  col_meta_clean <- col_meta_clean[, c(TRUE, !redundant_cols), drop=FALSE]
+}
+
 col_meta <- col_meta_clean
 
 # force first column name to be `_id` to match expected Needle format
@@ -78,6 +147,23 @@ write.table(expr_tpm_final,
 write.table(expr_counts_final,
             file = file.path(params$output_dir_path, "expr.expr_counts.txt"),
             sep = "\t", row.names = TRUE, quote = FALSE)
+```
+
+## Create series info file
+
+```{r series-info}
+# Use any constant columns we moved out of sample metadata as extra info
+extra_info <- if (!is.null(move_to_series)) as.list(move_to_series) else NULL
+
+GXPAinterface::make_series_info_file(
+  filename = file.path(params$output_dir_path, "expr.series_info.csv"),
+  series_name = params$series_name,
+  series_descript = params$series_descript %||% params$series_name,
+  default_group = colnames(col_meta)[2], # use first metadata col
+  organism = params$organism %||% "human",
+  expr_units = params$expr_units %||% "TPM",
+  extra.list = extra_info
+)
 ```
 
 ## DEG score file metadata (enter as R code here)
@@ -210,28 +296,8 @@ if (nrow(deg_meta) > 0) {
 
 ```{r mean-sd}
 if (params$calc_mean_sd) {
-  # Prefer raw TPM from the SE if available (assay `tpm_raw`).
-  # If not present, fall back to reading the original TPM input file
-  if ("tpm_raw" %in% names(SummarizedExperiment::assays(se))) {
-    tpm_mat <- as.data.frame(assay(se, "tpm_raw"))
-  } else {
-    # attempt to read TPM input file from params$input_dir_path
-    tpm_input_path <- file.path(params$input_dir_path, 'expr_matrix.tpm.txt')
-    if (!file.exists(tpm_input_path)) {
-      stop('Cannot compute mean/stdev: raw TPM not present in SE and input TPM file not found: ', tpm_input_path)
-    }
-    tpm_input <- read.delim(tpm_input_path, stringsAsFactors = FALSE, check.names = FALSE)
-    # assume first column is gene id and join to row_meta mapping
-    gene_id_col_expr_file <- colnames(tpm_input)[1]
-    tpm_input <- tpm_input %>% dplyr::left_join(row_meta %>% dplyr::select(gene_id, gene_symbol), by = setNames('gene_id', gene_id_col_expr_file))
-    tpm_processed <- tpm_input %>% dplyr::arrange(desc(rowMeans(dplyr::select(., -all_of(c(gene_id_col_expr_file, 'gene_symbol')))))) %>%
-      dplyr::distinct(gene_symbol, .keep_all = TRUE) %>%
-      dplyr::select(-all_of(c('gene_symbol', gene_id_col_expr_file)))
-    rownames(tpm_processed) <- tpm_input %>% dplyr::arrange(desc(rowMeans(dplyr::select(., -all_of(c(gene_id_col_expr_file, 'gene_symbol')))))) %>%
-      dplyr::distinct(gene_symbol, .keep_all = TRUE) %>%
-      dplyr::pull(gene_symbol)
-    tpm_mat <- as.data.frame(tpm_processed)
-  }
+  # Use the main TPM assay (which is log2 if do_log2_tpm_p1 was TRUE)
+  tpm_mat <- as.data.frame(assay(se_symbols, "tpm"))
 
   expr_tpm_means <- data.frame(
     gene_symbol = rownames(tpm_mat),
@@ -280,6 +346,7 @@ if (nrow(score_info_file) > 0) {
 Files written to `r params$output_dir_path`:
 
 - `r file.path(params$output_dir_path, "expr.samples.csv")`
+- `r file.path(params$output_dir_path, "expr.series_info.csv")`
 - `r file.path(params$output_dir_path, "expr.expr.txt")`
 - `r file.path(params$output_dir_path, "expr.expr_counts.txt")`
 - `r if (params$calc_mean_sd) { file.path(params$output_dir_path, "expr_data.mean.txt") } else { "mean file not generated" }`
