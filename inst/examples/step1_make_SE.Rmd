@@ -53,15 +53,28 @@ gene_meta_fn <- params$gene_meta_filename
 
 ```{r confirm-files}
 input_dir <- params$input_dir_path
-expr_counts_file_path <- file.path(input_dir, params$expr_counts_filename)
-expr_tpm_file_path <- file.path(input_dir, params$expr_tpm_filename)
+
+# Allow either counts or tpm filename to be blank/NULL; require at least one provided and existing
+expr_counts_file_path <- NULL
+expr_tpm_file_path <- NULL
 sample_meta_file_path <- file.path(input_dir, params$sample_meta_filename)
 
 if (!dir.exists(input_dir)) stop("Input directory does not exist: ", input_dir)
-if (!file.exists(expr_counts_file_path)) stop("Expression counts file does not exist: ", expr_counts_file_path)
-if (!file.exists(expr_tpm_file_path)) stop("Expression TPM file does not exist: ", expr_tpm_file_path)
+
+if (!is.null(params$expr_counts_filename) && !is.na(params$expr_counts_filename) && params$expr_counts_filename != "") {
+  expr_counts_file_path <- file.path(input_dir, params$expr_counts_filename)
+  if (!file.exists(expr_counts_file_path)) stop("Expression counts file does not exist: ", expr_counts_file_path)
+}
+
+if (!is.null(params$expr_tpm_filename) && !is.na(params$expr_tpm_filename) && params$expr_tpm_filename != "") {
+  expr_tpm_file_path <- file.path(input_dir, params$expr_tpm_filename)
+  if (!file.exists(expr_tpm_file_path)) stop("Expression TPM file does not exist: ", expr_tpm_file_path)
+}
+
 if (!file.exists(sample_meta_file_path)) stop("Samples file does not exist: ", sample_meta_file_path)
 if (!file.exists(file.path(input_dir, gene_meta_fn))) stop("Gene metadata file not found: ", gene_meta_fn)
+
+if (is.null(expr_counts_file_path) && is.null(expr_tpm_file_path)) stop("At least one of params$expr_counts_filename or params$expr_tpm_filename must be provided and exist.")
 ```
 
 ## Sample metadata
@@ -78,14 +91,22 @@ samples <- samples %>% dplyr::select(where(~ !all(is.na(.x) | .x %in% c("\"NA\""
 ## Read expression matrices
 
 ```{r read-expr}
-expr_counts <- read.delim(expr_counts_file_path, stringsAsFactors = FALSE, check.names = FALSE)
-expr_tpm <- read.delim(expr_tpm_file_path, stringsAsFactors = FALSE, check.names = FALSE)
+expr_counts <- NULL
+expr_tpm <- NULL
 
-# rename first column to gene_id
-colnames(expr_counts)[1] <- "gene_id"
-colnames(expr_tpm)[1] <- "gene_id"
+if (!is.null(expr_counts_file_path)) {
+  expr_counts <- read.delim(expr_counts_file_path, stringsAsFactors = FALSE, check.names = FALSE)
+  colnames(expr_counts)[1] <- "gene_id"
+}
 
-if (!all(colnames(expr_counts) == colnames(expr_tpm))) stop("Column names (samples) of expr_counts and expr_tpm do not match")
+if (!is.null(expr_tpm_file_path)) {
+  expr_tpm <- read.delim(expr_tpm_file_path, stringsAsFactors = FALSE, check.names = FALSE)
+  colnames(expr_tpm)[1] <- "gene_id"
+}
+
+if (!is.null(expr_counts) && !is.null(expr_tpm)) {
+  if (!all(colnames(expr_counts) == colnames(expr_tpm))) stop("Column names (samples) of expr_counts and expr_tpm do not match")
+}
 ```
 
 ## Gene metadata
@@ -101,38 +122,47 @@ gene_meta <- gene_meta %>%
   dplyr::select(unique_gene_id, everything())
 
 # check mapping coverage
-num_missing_gene_ids_from_counts <- sum(!gene_meta$unique_gene_id %in% expr_counts$gene_id)
-num_missing_gene_ids_from_tpm <- sum(!gene_meta$unique_gene_id %in% expr_tpm$gene_id)
+if (!is.null(expr_counts)) {
+  num_missing_gene_ids_from_counts <- sum(!gene_meta$unique_gene_id %in% expr_counts$gene_id)
+  if (num_missing_gene_ids_from_counts / nrow(gene_meta) > 0.2) message("Warning: More than 20% of gene ids in metadata are missing from expr_counts")
+}
 
-if (num_missing_gene_ids_from_counts / nrow(gene_meta) > 0.2) message("Warning: More than 20% of gene ids in metadata are missing from expr_counts")
-if (num_missing_gene_ids_from_tpm / nrow(gene_meta) > 0.2) message("Warning: More than 20% of gene ids in metadata are missing from expr_tpm")
+if (!is.null(expr_tpm)) {
+  num_missing_gene_ids_from_tpm <- sum(!gene_meta$unique_gene_id %in% expr_tpm$gene_id)
+  if (num_missing_gene_ids_from_tpm / nrow(gene_meta) > 0.2) message("Warning: More than 20% of gene ids in metadata are missing from expr_tpm")
+}
 ```
 
 ## Align expression with samples and genes
 
 ```{r align}
-# Filter expression to only include samples in our cleaned metadata
-expr_tpm_final <- expr_tpm %>% dplyr::filter(gene_id %in% gene_meta$unique_gene_id)
-expr_counts_final <- expr_counts %>% dplyr::filter(gene_id %in% gene_meta$unique_gene_id)
+# Filter expression to only include genes present in gene_meta
+expr_tpm_final <- NULL
+expr_counts_final <- NULL
 
-# Set rownames to gene_id and remove the id column
-rownames(expr_tpm_final) <- expr_tpm_final$gene_id
-rownames(expr_counts_final) <- expr_counts_final$gene_id
+if (!is.null(expr_tpm)) {
+  expr_tpm_final <- expr_tpm %>% dplyr::filter(gene_id %in% gene_meta$unique_gene_id)
+  rownames(expr_tpm_final) <- expr_tpm_final$gene_id
+  expr_tpm_final <- expr_tpm_final %>% dplyr::select(-gene_id)
+}
 
-expr_tpm_final <- expr_tpm_final %>% dplyr::select(-gene_id)
-expr_counts_final <- expr_counts_final %>% dplyr::select(-gene_id)
+if (!is.null(expr_counts)) {
+  expr_counts_final <- expr_counts %>% dplyr::filter(gene_id %in% gene_meta$unique_gene_id)
+  rownames(expr_counts_final) <- expr_counts_final$gene_id
+  expr_counts_final <- expr_counts_final %>% dplyr::select(-gene_id)
+}
 
-# Filter to common samples (order remains original for now)
-common_samples <- intersect(samples[[params$sample_primary_key]], colnames(expr_tpm_final))
-expr_tpm_final <- expr_tpm_final[, common_samples, drop = FALSE]
-expr_counts_final <- expr_counts_final[, common_samples, drop = FALSE]
-samples <- samples[samples[[params$sample_primary_key]] %in% common_samples, ]
+# Choose a primary expression matrix (TPM preferred) for sample/gene ordering decisions
+expr_primary_final <- if (!is.null(expr_tpm_final)) expr_tpm_final else expr_counts_final
 
-# align row data (gene_meta) to match the expression matrices
+# Ensure the primary expression matrix exists and has samples
+if (is.null(expr_primary_final) || ncol(expr_primary_final) == 0) stop("Expression matrix is missing or has no samples.")
+
+# align row data (gene_meta) to match the primary expression matrix
 if (params$feature_reorder_allowed) {
-  gene_meta <- gene_meta[match(rownames(expr_tpm_final), gene_meta$unique_gene_id), ]
+  gene_meta <- gene_meta[match(rownames(expr_primary_final), gene_meta$unique_gene_id), ]
 } else {
-  if (!all(gene_meta$unique_gene_id == rownames(expr_tpm_final))) {
+  if (!all(gene_meta$unique_gene_id == rownames(expr_primary_final))) {
     stop("Gene metadata and expression matrices do not contain the same genes in the same order. Try setting params$feature_reorder_allowed=TRUE.")
   }
 }
@@ -143,21 +173,21 @@ if (params$feature_reorder_allowed) {
 ```{r build-se}
 # prepare rowData and colData
 row_df <- gene_meta
-rownames(row_df) <- row_df$gene_id
+rownames(row_df) <- if (!is.null(row_df$unique_gene_id)) row_df$unique_gene_id else NULL
 
 col_df <- samples
 rownames(col_df) <- samples[[params$sample_primary_key]]
 
 # Validation: Check if sample metadata and expression matrices align
 sample_names_meta <- rownames(col_df)
-sample_names_expr <- colnames(expr_tpm_final)
+sample_names_expr <- colnames(expr_primary_final)
 
 if (!all(sample_names_meta == sample_names_expr)) {
   if (all(sort(sample_names_meta) == sort(sample_names_expr))) {
     if (params$sample_reorder_allowed) {
       message("Reordering expression matrices to match sample metadata order.")
-      expr_tpm_final <- expr_tpm_final[, sample_names_meta, drop = FALSE]
-      expr_counts_final <- expr_counts_final[, sample_names_meta, drop = FALSE]
+      if (!is.null(expr_tpm_final)) expr_tpm_final <- expr_tpm_final[, sample_names_meta, drop = FALSE]
+      if (!is.null(expr_counts_final)) expr_counts_final <- expr_counts_final[, sample_names_meta, drop = FALSE]
     } else {
       stop("Sample metadata and expression matrix are not in the same order. Set params$sample_reorder_allowed=TRUE to fix.")
     }
@@ -166,10 +196,9 @@ if (!all(sample_names_meta == sample_names_expr)) {
   }
 }
 
-assays_list <- list(
-  tpm = as.matrix(expr_tpm_final),
-  counts = as.matrix(expr_counts_final)
-)
+assays_list <- list()
+if (!is.null(expr_tpm_final)) assays_list$tpm <- as.matrix(expr_tpm_final)
+if (!is.null(expr_counts_final)) assays_list$counts <- as.matrix(expr_counts_final)
 
 se <- SummarizedExperiment::SummarizedExperiment(assays = assays_list, rowData = row_df, colData = col_df)
 
