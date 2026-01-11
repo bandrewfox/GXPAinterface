@@ -47,63 +47,6 @@ if (interactive() && !exists("params")) {
 }
 ```
 
-## Load the saved SummarizedExperiment and pre-process
-
-```{r load-se}
-se_path <- file.path(params$output_dir_path, params$se_rdata_filename)
-if (!file.exists(se_path)) stop("SE Rdata not found: ", se_path)
-load(se_path) # expects object named `se`
-if (!exists("se")) stop("Loaded file did not contain object named 'se'")
-
-# 1. Filter samples
-if (!is.null(params$remove_list)) {
-  remove_list <- eval(parse(text = params$remove_list))
-  se <- GXPAinterface::filter_se_samples(se, remove_list)
-}
-
-# 2. Extract constant metadata for series info
-se_list <- GXPAinterface::extract_se_constant_metadata(se)
-se <- se_list$se
-extra_info <- se_list$constant_meta
-
-# 3. Deduplicate by symbol (keeps row with highest mean expr)
-se_symbols <- GXPAinterface::deduplicate_se_by_symbol(
-  se = se,
-  symbol_col = params$gene_symbol_column,
-  primary_assay = if ("tpm" %in% SummarizedExperiment::assayNames(se)) "tpm" else "counts"
-)
-
-# 4. Perform log2 transform on TPM if requested
-if (params$do_log2_tpm_p1 && "tpm" %in% SummarizedExperiment::assayNames(se_symbols)) {
-  assay(se_symbols, "tpm_raw") <- SummarizedExperiment::assay(se_symbols, "tpm")
-  SummarizedExperiment::assay(se_symbols, "tpm") <- round(log2(SummarizedExperiment::assay(se_symbols, "tpm") + 1), 5)
-}
-
-# 5. Write expression and sample metadata to GXPA flat files
-GXPAinterface::write_se_to_gxpa(
-  se = se_symbols,
-  output_dir = params$output_dir_path,
-  run_checks = TRUE
-)
-```
-
-## Create series info file
-
-```{r series-info}
-extra_info$default_color <- params$series_default_color
-extra_info$analyst <- params$series_analyst
-
-GXPAinterface::make_series_info_file(
-  filename = file.path(params$output_dir_path, "expr.series_info.csv"),
-  series_name = params$series_name,
-  series_descript = params$series_descript %||% params$series_name,
-  default_group = params$series_default_group,
-  organism = params$organism %||% "human",
-  expr_units = params$expr_units %||% "TPM",
-  extra.list = extra_info
-)
-```
-
 ## DEG score file metadata (enter as R code here)
 
 ```{r deg_meta_params}
@@ -133,11 +76,68 @@ if (params$process_score_files) {
 }
 ```
 
+## Load the saved SummarizedExperiment and pre-process
+
+```{r load-se}
+se_path <- file.path(params$output_dir_path, params$se_rdata_filename)
+if (!file.exists(se_path)) stop("SE Rdata not found: ", se_path)
+load(se_path) # expects object named `se`
+if (!exists("se")) stop("Loaded file did not contain object named 'se'")
+
+# 1. Filter samples
+if (!is.null(params$remove_list)) {
+  remove_list <- eval(parse(text = params$remove_list))
+  se <- GXPAinterface::filter_se_samples(se, remove_list)
+}
+
+# 2. Extract constant metadata for series info
+tmp <- GXPAinterface::extract_se_constant_metadata(se)
+se <- tmp$se
+extra_info <- tmp$constant_meta
+
+# 3. Deduplicate by symbol (keeps row with highest mean expr)
+se_symbols <- GXPAinterface::deduplicate_se_by_symbol(
+  se = se,
+  symbol_col = params$gene_symbol_column,
+  primary_assay = if ("tpm" %in% assayNames(se)) "tpm" else "counts"
+)
+
+# 4. Perform log2 transform on TPM if requested
+if (params$do_log2_tpm_p1 && "tpm" %in% assayNames(se_symbols)) {
+  assay(se_symbols, "tpm_raw") <- assay(se_symbols, "tpm")
+  assay(se_symbols, "tpm") <- round(log2(assay(se_symbols, "tpm") + 1), 5)
+}
+
+# 5. Write expression and sample metadata to GXPA flat files
+GXPAinterface::write_se_to_gxpa(
+  se = se_symbols,
+  output_dir = params$output_dir_path,
+  run_checks = TRUE
+)
+```
+
+## Create series info file
+
+```{r series-info}
+extra_info$default_color <- params$series_default_color
+extra_info$analyst <- params$series_analyst
+
+GXPAinterface::make_series_info_file(
+  filename = file.path(params$output_dir_path, "expr.series_info.csv"),
+  series_name = params$series_name,
+  series_descript = params$series_descript %||% params$series_name,
+  default_group = params$series_default_group,
+  organism = params$organism %||% "human",
+  expr_units = params$expr_units %||% "TPM",
+  extra.list = extra_info
+)
+```
+
 ## Read and modify DEG score files (using SE rowData mapping)
 
 ```{r read-score-files}
 # gene mapping for score processing (maps original unique_gene_id to symbols)
-gene_map <- as.data.frame(SummarizedExperiment::rowData(se_symbols)) %>% 
+gene_map <- as.data.frame(rowData(se_symbols)) %>% 
   dplyr::select(gene_id = !!rlang::sym("unique_gene_id"), 
                 gene_symbol = !!rlang::sym(params$gene_symbol_column))
 
@@ -155,7 +155,7 @@ score_info_file <- GXPAinterface::process_gxpa_scores(
 ```{r mean-sd}
 if (params$calc_mean_sd) {
   # Use the main TPM assay
-  tpm_mat <- as.matrix(SummarizedExperiment::assay(se_symbols, "tpm"))
+  tpm_mat <- as.matrix(assay(se_symbols, "tpm"))
   
   mean_sd_info <- GXPAinterface::write_mean_sd_scores(
     tpm_mat = tpm_mat,

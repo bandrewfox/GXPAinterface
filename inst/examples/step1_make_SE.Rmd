@@ -53,13 +53,11 @@ gene_meta_fn <- params$gene_meta_filename
 
 ```{r confirm-files}
 input_dir <- params$input_dir_path
+if (!dir.exists(input_dir)) stop("Input directory does not exist: ", input_dir)
 
 # Allow either counts or tpm filename to be blank/NULL; require at least one provided and existing
 expr_counts_file_path <- NULL
 expr_tpm_file_path <- NULL
-sample_meta_file_path <- file.path(input_dir, params$sample_meta_filename)
-
-if (!dir.exists(input_dir)) stop("Input directory does not exist: ", input_dir)
 
 if (!is.null(params$expr_counts_filename) && !is.na(params$expr_counts_filename) && params$expr_counts_filename != "") {
   expr_counts_file_path <- file.path(input_dir, params$expr_counts_filename)
@@ -71,10 +69,13 @@ if (!is.null(params$expr_tpm_filename) && !is.na(params$expr_tpm_filename) && pa
   if (!file.exists(expr_tpm_file_path)) stop("Expression TPM file does not exist: ", expr_tpm_file_path)
 }
 
+if (is.null(expr_counts_file_path) && is.null(expr_tpm_file_path)) stop("At least one of params$expr_counts_filename or params$expr_tpm_filename must be provided and exist.")
+
+# now check samples and gene meta
+sample_meta_file_path <- file.path(input_dir, params$sample_meta_filename)
 if (!file.exists(sample_meta_file_path)) stop("Samples file does not exist: ", sample_meta_file_path)
 if (!file.exists(file.path(input_dir, gene_meta_fn))) stop("Gene metadata file not found: ", gene_meta_fn)
 
-if (is.null(expr_counts_file_path) && is.null(expr_tpm_file_path)) stop("At least one of params$expr_counts_filename or params$expr_tpm_filename must be provided and exist.")
 ```
 
 ## Sample metadata
