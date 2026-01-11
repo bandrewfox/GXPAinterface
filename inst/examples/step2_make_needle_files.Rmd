@@ -59,24 +59,26 @@ if (!exists("se")) stop("Loaded file did not contain object named 'se'")
 if (!is.null(params$remove_list)) {
   remove_list <- eval(parse(text = params$remove_list))
   # Use colData to find IDs to remove
-  col_meta_df <- as.data.frame(colData(se))
+  tmp <- as.data.frame(colData(se))
   remove_ids <- purrr::imap(remove_list, function(x, idx) {
-    if (any(colnames(col_meta_df) == idx)) {
-      # Use rownames as the sample IDs since _id rename hasn't happened yet
-      rownames(col_meta_df)[col_meta_df[[idx]] %in% x]
+    if (any(colnames(tmp) == idx)) {
+      # Use rownames as the sample IDs
+      rownames(tmp)[tmp[[idx]] %in% x]
     }
   }) %>% unlist()
   
   if (length(remove_ids) > 0) {
+    # make changes directly to se
+    message("Removing ", length(remove_ids), " samples based on remove_list criteria.")
     se <- se[, !(colnames(se) %in% remove_ids)]
   }
 }
 
 # move constant columns into series-level metadata
-col_meta_df <- as.data.frame(colData(se))
-cols_to_move <- as.logical(purrr::map_dbl(col_meta_df, ~ length(unique(.x))) == 1)
+tmp <- as.data.frame(colData(se))
+cols_to_move <- as.logical(purrr::map_dbl(tmp, ~ length(unique(.x))) == 1)
 if (any(cols_to_move)) {
-  move_to_series <- col_meta_df[, cols_to_move, drop = FALSE] %>% unique()
+  move_to_series <- tmp[, cols_to_move, drop = FALSE] %>% unique()
   # Remove from colData
   colData(se) <- colData(se)[, !cols_to_move, drop = FALSE]
 } else {
@@ -87,6 +89,7 @@ if (any(cols_to_move)) {
 row_meta_full <- as.data.frame(rowData(se))
 symbol_col <- params$gene_symbol_column
 if (!symbol_col %in% colnames(row_meta_full)) stop(paste("rowData(se) must contain symbol column:", symbol_col))
+if (!"unique_gene_id" %in% colnames(row_meta_full)) stop("rowData(se) must contain 'unique_gene_id' column")
 
 # Create a clear gene_symbol column for downstream code
 row_meta_full$gene_symbol <- row_meta_full[[symbol_col]]
@@ -105,15 +108,19 @@ row_meta_full$mean_for_dedup <- row_means
 best_ids <- row_meta_full %>%
   dplyr::arrange(desc(mean_for_dedup)) %>%
   dplyr::distinct(gene_symbol, .keep_all = TRUE) %>%
-  dplyr::pull(gene_id)
+  dplyr::pull(unique_gene_id)
+```
 
+### Subset SE with best IDs, do log2, write Needle files
+
+```{r make-subset-se}
 se_symbols <- se[best_ids, ]
 rownames(se_symbols) <- rowData(se_symbols)[[symbol_col]]
 
 # Now perform log2 transform on the TPM assay if requested and present
 if (params$do_log2_tpm_p1) {
   if (has_tpm) {
-    # assay(se_symbols, "tpm_raw") <- assay(se_symbols, "tpm")   # not used
+    assay(se_symbols, "tpm_raw") <- assay(se_symbols, "tpm")
     assay(se_symbols, "tpm") <- round(log2(assay(se_symbols, "tpm") + 1), 5)
   } else {
     message("params$do_log2_tpm_p1 requested but no 'tpm' assay present; skipping log2 transform.")
@@ -128,35 +135,12 @@ if (has_counts) expr_counts_final <- as.data.frame(assay(se_symbols, "counts"))
 row_meta <- as.data.frame(rowData(se_symbols))
 # Ensure gene_symbol is consistently available in row_meta
 row_meta$gene_symbol <- row_meta[[symbol_col]]
-col_meta <- as.data.frame(colData(se_symbols))
-
-# ensure `_id` column exists in col_meta (convert rownames to `_id` if necessary)
-col_meta_clean <- as.data.frame(col_meta, stringsAsFactors = FALSE)
-# remove any existing duplicated id-like columns (e.g., X_id, X_id.1, or existing _id)
-col_meta_clean <- col_meta_clean %>% dplyr::select(-dplyr::matches('^X_id(\\.|$)|^_id$'))
-
-# now add a single `_id` column from the rownames as the first column
-col_meta_clean <- data.frame(`_id` = rownames(col_meta), col_meta, stringsAsFactors = FALSE, check.names = FALSE)
-
-# remove columns that are identical to the _id column (often the original primary key)
-# only remove if it's a character or factor type to be safe
-cols_to_check <- which(sapply(col_meta_clean, function(x) is.character(x) || is.factor(x)))
-cols_to_check <- setdiff(cols_to_check, 1) # don't check _id against itself
-
-redundant_cols <- sapply(cols_to_check, function(i) {
-  all(as.character(col_meta_clean[[i]]) == as.character(col_meta_clean$`_id`))
-})
-
-if (any(redundant_cols)) {
-  col_meta_clean <- col_meta_clean[, -cols_to_check[redundant_cols], drop = FALSE]
-}
-col_meta <- col_meta_clean
-
-# force first column name to be `_id` to match expected Needle format
-names(col_meta)[1] <- "_id"
 
 # write out sample metadata (colData) as expr.samples.csv
-write.table(col_meta, file = file.path(params$output_dir_path, "expr.samples.csv"), sep = ",", row.names = FALSE, quote = FALSE)
+# first, add a single `_id` column from the rownames as the first column
+tmp <- as.data.frame(colData(se_symbols))
+tmp <- data.frame(`_id` = rownames(tmp), tmp, stringsAsFactors = FALSE, check.names = TRUE)
+write.table(tmp, file = file.path(params$output_dir_path, "expr.samples.csv"), sep = ",", row.names = FALSE, quote = FALSE)
 
 # write expression matrices (only the assays that exist)
 if (!is.null(expr_tpm_final)) {
@@ -234,22 +218,9 @@ if (params$process_score_files) {
 ## Read and modify DEG score files (using SE rowData mapping)
 
 ```{r read-score-files}
-# prepare mapping from gene_id -> gene_symbol using row_meta
-if (!("gene_id" %in% colnames(row_meta)) || !("gene_symbol" %in% colnames(row_meta))) {
-  # try to recover if gene_id was stored under a different name
-  if ("gene_symbol" %in% colnames(row_meta)) {
-    row_meta$gene_id <- ifelse(!is.null(row_meta$gene_id), row_meta$gene_id, NA)
-  } else {
-    stop("rowData(se) must contain at least gene_symbol (and ideally gene_id)")
-  }
-}
-
-feat <- row_meta %>% dplyr::select(gene_id, gene_symbol)
-rownames(feat) <- feat$gene_symbol
 
 # gene ids to keep (from SE)
-gene_ids_to_keep <- feat$gene_id
-
+gene_ids_to_keep <- row_meta$unique_gene_id
 # initialize score_info_file dataframe
 score_info_file <- data.frame(
   name = character(),
@@ -282,7 +253,9 @@ if (nrow(deg_meta) > 0) {
       FDR_rank   = rank(.data[[deg_meta$fdr_column[i]]], ties.method = "first", na.last = "keep")
     )
 
-    score_data <- score_data %>% dplyr::left_join(feat, by = setNames("gene_id", "gene_id"))
+    score_data <- score_data %>% 
+        dplyr::left_join(row_meta %>% select(unique_gene_id, gene_symbol),
+                         by = setNames("unique_gene_id", "gene_id"))
     rownames(score_data) <- score_data$gene_symbol
     score_data <- score_data %>% dplyr::select(-gene_symbol)
 
