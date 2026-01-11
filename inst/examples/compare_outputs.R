@@ -26,7 +26,9 @@ compare_tabular_files <- function(file1, file2) {
   df1 <- try_read_table(file1)
   df2 <- try_read_table(file2)
   if (is.null(df1) || is.null(df2)) return(NA)
-  if (!all(dim(df1) == dim(df2))) return("diff_shape")
+  if (!all(dim(df1) == dim(df2))) {
+    return(list(type = "diff_shape", shape1 = paste0(nrow(df1), "x", ncol(df1)), shape2 = paste0(nrow(df2), "x", ncol(df2))))
+  }
   if (identical(df1, df2)) return("identical")
   # Check for same rows and counts, but different order
   if (all(table(apply(df1, 1, paste, collapse = "\r")) == table(apply(df2, 1, paste, collapse = "\r")))) {
@@ -42,14 +44,15 @@ if (length(common_files) == 0) {
     out_path <- file.path(output_dir, fname)
     exp_path <- file.path(expected_dir, fname)
     cmp <- compare_tabular_files(out_path, exp_path)
-    if (!is.na(cmp)) {
-      if (cmp == "identical") {
-        cat(sprintf('MATCH: %s (tabular, identical)\n', fname))
-      } else if (cmp == "diff_order") {
-        cat(sprintf('DIFF_ORDER: %s (tabular, same rows, different order)\n', fname))
-      } else if (cmp == "diff_shape") {
+    if (!is.null(cmp)) {
+      if (is.list(cmp) && cmp$type == "diff_shape") {
         cat(sprintf('DIFFER: %s\n  Reason: tabular files have different shape\n', fname))
-      } else if (cmp == "diff_content") {
+        cat(sprintf('  Output shape: %s\n  Expected shape: %s\n', cmp$shape1, cmp$shape2))
+      } else if (identical(cmp, "identical")) {
+        cat(sprintf('MATCH: %s (tabular, identical)\n', fname))
+      } else if (identical(cmp, "diff_order")) {
+        cat(sprintf('DIFF_ORDER: %s (tabular, same rows, different order)\n', fname))
+      } else if (identical(cmp, "diff_content")) {
         cat(sprintf('DIFFER: %s\n  Reason: tabular files differ in content\n', fname))
       }
       next
