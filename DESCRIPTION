@@ -14,11 +14,13 @@ License: MIT + file LICENSE
 URL: https://github.com/wfulp/GXPAinterface
 BugReports: https://github.com/wfulp/GXPAinterface/issues
 Imports:
+    dplyr,
     httr,
     jsonlite,
-    purrr
+    purrr,
+    rlang,
+    SummarizedExperiment
 Suggests: 
-    dplyr,
     DT,
     readr,
     revealxpress (>= 1.0.5),
