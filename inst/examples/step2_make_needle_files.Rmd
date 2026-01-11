@@ -91,9 +91,15 @@ if (!symbol_col %in% colnames(row_meta_full)) stop(paste("rowData(se) must conta
 # Create a clear gene_symbol column for downstream code
 row_meta_full$gene_symbol <- row_meta_full[[symbol_col]]
 
-# Calculate means to decide which gene_id to keep for each symbol
-# Use 'tpm' assay (which is raw from Step 1)
-row_means <- rowMeans(assay(se, "tpm"))
+# Detect assays present and choose a primary assay (prefer tpm)
+assay_names_se <- SummarizedExperiment::assayNames(se)
+has_tpm <- "tpm" %in% assay_names_se
+has_counts <- "counts" %in% assay_names_se
+if (!has_tpm && !has_counts) stop("SE must contain at least one assay named 'tpm' or 'counts'.")
+primary_assay <- if (has_tpm) "tpm" else "counts"
+
+# Calculate means to decide which gene_id to keep for each symbol using primary assay
+row_means <- rowMeans(assay(se, primary_assay))
 row_meta_full$mean_for_dedup <- row_means
 
 best_ids <- row_meta_full %>%
@@ -104,16 +110,21 @@ best_ids <- row_meta_full %>%
 se_symbols <- se[best_ids, ]
 rownames(se_symbols) <- rowData(se_symbols)[[symbol_col]]
 
-# Now perform log2 transform if requested
+# Now perform log2 transform on the TPM assay if requested and present
 if (params$do_log2_tpm_p1) {
-  # Save raw for mean/sd later if needed, but the main 'tpm' assay will be log2
-  assay(se_symbols, "tpm_raw") <- assay(se_symbols, "tpm")
-  assay(se_symbols, "tpm") <- round(log2(assay(se_symbols, "tpm") + 1), 5)
+  if (has_tpm) {
+    # assay(se_symbols, "tpm_raw") <- assay(se_symbols, "tpm")   # not used
+    assay(se_symbols, "tpm") <- round(log2(assay(se_symbols, "tpm") + 1), 5)
+  } else {
+    message("params$do_log2_tpm_p1 requested but no 'tpm' assay present; skipping log2 transform.")
+  }
 }
 
-# extract matrices and metadata for output
-expr_tpm_final <- as.data.frame(assay(se_symbols, "tpm"))
-expr_counts_final <- as.data.frame(assay(se_symbols, "counts"))
+# extract matrices and metadata for output (only if assays exist)
+expr_tpm_final <- NULL
+expr_counts_final <- NULL
+if (has_tpm) expr_tpm_final <- as.data.frame(assay(se_symbols, "tpm"))
+if (has_counts) expr_counts_final <- as.data.frame(assay(se_symbols, "counts"))
 row_meta <- as.data.frame(rowData(se_symbols))
 # Ensure gene_symbol is consistently available in row_meta
 row_meta$gene_symbol <- row_meta[[symbol_col]]
@@ -147,14 +158,22 @@ names(col_meta)[1] <- "_id"
 # write out sample metadata (colData) as expr.samples.csv
 write.table(col_meta, file = file.path(params$output_dir_path, "expr.samples.csv"), sep = ",", row.names = FALSE, quote = FALSE)
 
-# write expression matrices (TPM and counts)
-write.table(expr_tpm_final,
-            file = file.path(params$output_dir_path, "expr.expr.txt"),
-            sep = "\t", row.names = TRUE, quote = FALSE)
+# write expression matrices (only the assays that exist)
+if (!is.null(expr_tpm_final)) {
+  write.table(expr_tpm_final,
+              file = file.path(params$output_dir_path, "expr.expr.txt"),
+              sep = "\t", row.names = TRUE, quote = FALSE)
+} else {
+  message("No 'tpm' assay found; skipping writing expr.expr.txt")
+}
 
-write.table(expr_counts_final,
-            file = file.path(params$output_dir_path, "expr.expr_counts.txt"),
-            sep = "\t", row.names = TRUE, quote = FALSE)
+if (!is.null(expr_counts_final)) {
+  write.table(expr_counts_final,
+              file = file.path(params$output_dir_path, "expr.expr_counts.txt"),
+              sep = "\t", row.names = TRUE, quote = FALSE)
+} else {
+  message("No 'counts' assay found; skipping writing expr.expr_counts.txt")
+}
 ```
 
 ## Create series info file
