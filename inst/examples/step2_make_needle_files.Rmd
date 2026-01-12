@@ -136,9 +136,9 @@ GXPAinterface::make_series_info_file(
 ## Read and modify DEG score files (using SE rowData mapping)
 
 ```{r read-score-files}
-# gene mapping for score processing (maps original unique_gene_id to symbols)
+# gene mapping for score processing (maps original gene_ids to symbols)
 gene_map <- as.data.frame(rowData(se_symbols)) %>% 
-  dplyr::select(gene_id = !!rlang::sym("unique_gene_id"), 
+  dplyr::select(gene_id, 
                 gene_symbol = !!rlang::sym(params$gene_symbol_column))
 
 score_info_file <- GXPAinterface::process_gxpa_scores(

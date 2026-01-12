@@ -40,6 +40,21 @@ This file gives concise, actionable guidance for AI coding agents (and humans) w
   - Series info: `expr.series_info.csv` / `GEO.series_info.csv`
 - `check_files_for_GXPA()` enforces strict rules: first metadata column must be `_id` or blank; no duplicate sample names; metadata column names must be valid R variable names.
 
+## Column & variable naming conventions
+
+The package uses several hardcoded column names and internal keys that must be preserved for compatibility with the GXPA server and internal processing:
+
+- **Samples Metadata**: The first column must be named `_id` (contains sample IDs).
+- **Gene Tracking**: 
+  - `gene_id`: Used in `rowData(se)` to preserve original IDs (e.g., Ensembl) after rownames are switched to symbols.
+  - `gene_symbol`: Used as a temporary column during score file merging.
+- **Score Ranking**: `logFC_rank` and `FDR_rank` are generated and expected in processed score files.
+- **Summary Statistics**: 
+  - Mean/SD files use column names `mean`, `stdev`, and `rank`.
+  - Inside `R`, `mean_for_dedup` is used as a temporary column for deduplication logic.
+- **Series Info Keys**: The CSV output of `make_series_info_file` uses fixed keys: `series_name`, `series_descript`, `default_group`, `organism`, `expr_units`, `pmid`, `analyst`, `analyst_comments`, and `default_color`.
+- **Assay Names**: Default assays are named `tpm` and `counts`.
+
 ## Example scripts
 
 - Example RMarkdown scripts are provided in the `inst/examples/` folder. These are not tests, but user-facing workflow examples (e.g., `upload_via_interface.Rmd`, `local_processing.Rmd`).
@@ -70,7 +85,11 @@ To knit an Rmd file using the same R version as your VS Code session (e.g., R 4.
 
 ```powershell
 & "C:\Program Files\R\R-4.2.3\bin\Rscript.exe" -e "rmarkdown::render('inst/examples/local_processing.Rmd')"
+
+# Or, to install the package and then run multiple example scripts:
+& "C:\Program Files\R\R-4.2.3\bin\Rscript.exe" -e "devtools::install(upgrade = 'never')" ; & "C:\Program Files\R\R-4.2.3\bin\Rscript.exe" -e "rmarkdown::render('inst/examples/step1_make_SE.Rmd')" ; & "C:\Program Files\R\R-4.2.3\bin\Rscript.exe" -e "rmarkdown::render('inst/examples/step2_make_needle_files.Rmd')" ; & "C:\Program Files\R\R-4.2.3\bin\Rscript.exe" "inst/examples/compare_outputs.R"
 ```
+
 This ensures the same R environment and user libraries are used as in your interactive session. Adjust the path and file as needed for your setup.
 
 - Use `remotes::install_github('wfulp/GXPAinterface')` for installing the package as users would.

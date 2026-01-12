@@ -51,10 +51,10 @@ assemble_gxpa_se <- function(counts_df = NULL,
   row_df <- gene_meta
   if (!gene_id_col %in% colnames(row_df)) stop("gene_id_col '", gene_id_col, "' not found in gene_meta.")
   rownames(row_df) <- row_df[[gene_id_col]]
-  
-  # Ensure unique_gene_id column exists
-  if (!"unique_gene_id" %in% colnames(row_df)) {
-    row_df$unique_gene_id <- row_df[[gene_id_col]]
+
+  # Ensure a standard 'gene_id' column exists for tracking original IDs
+  if (!"gene_id" %in% colnames(row_df)) {
+    row_df$gene_id <- rownames(row_df)
   }
 
   # 2. Prepare Sample Metadata
@@ -78,22 +78,23 @@ assemble_gxpa_se <- function(counts_df = NULL,
 
   # 4. Alignment
   primary_mat <- if (!is.null(tpm_mat)) tpm_mat else counts_mat
-  
+
   # Filter row_df to match expression
   row_df <- row_df[match(rownames(primary_mat), rownames(row_df)), , drop = FALSE]
-  
+
   # Align samples
   sample_names_meta <- rownames(col_df)
   sample_names_expr <- colnames(primary_mat)
-  
+
   if (!all(sample_names_meta %in% sample_names_expr)) {
-      missing <- setdiff(sample_names_meta, sample_names_expr)
-      message("Warning: Sample metadata contains samples not found in expression matrices (", 
-              length(missing), " missing). Filtering colData.")
-      col_df <- col_df[sample_names_meta %in% sample_names_expr, , drop = FALSE]
-      sample_names_meta <- rownames(col_df)
+    missing <- setdiff(sample_names_meta, sample_names_expr)
+    message("Warning: Sample metadata contains samples not ",
+            "found in expression matrices (",
+            length(missing), " missing). Filtering colData.")
+    col_df <- col_df[sample_names_meta %in% sample_names_expr, , drop = FALSE]
+    sample_names_meta <- rownames(col_df)
   }
-  
+
   # Subset and reorder matrices to match col_df
   if (!is.null(counts_mat)) counts_mat <- counts_mat[, sample_names_meta, drop = FALSE]
   if (!is.null(tpm_mat)) tpm_mat <- tpm_mat[, sample_names_meta, drop = FALSE]
@@ -158,21 +159,19 @@ deduplicate_se_by_symbol <- function(se, symbol_col, primary_assay = "tpm") {
     stop("Symbol column '", symbol_col, "' not found in rowData(se).")
   }
 
-  # Add unique_gene_id if not present for tracking
-  if (!"unique_gene_id" %in% colnames(row_meta)) {
-    row_meta$unique_gene_id <- rownames(row_meta)
-  }
+  # Calculate mean expression for deduplication
+  row_meta$mean_for_dedup <- rowMeans(SummarizedExperiment::assay(se, primary_assay), na.rm = TRUE)
 
-  row_meta$gene_symbol_for_dedup <- row_meta[[symbol_col]]
-  row_means <- rowMeans(SummarizedExperiment::assay(se, primary_assay), na.rm = TRUE)
-  row_meta$mean_for_dedup <- row_means
-
+  # Select best IDs based on highest mean expression per unique symbol
   best_ids <- row_meta %>%
-    dplyr::arrange(dplyr::desc(mean_for_dedup)) %>%
-    dplyr::distinct(gene_symbol_for_dedup, .keep_all = TRUE) %>%
-    dplyr::pull(unique_gene_id)
+    dplyr::arrange(dplyr::desc(.data$mean_for_dedup)) %>%
+    dplyr::distinct(.data[[symbol_col]], .keep_all = TRUE) %>%
+    rownames()
 
+  # Subset SE to best IDs
   se_dedup <- se[best_ids, ]
+
+  # Set rownames to newly assigned unique gene symbols
   rownames(se_dedup) <- SummarizedExperiment::rowData(se_dedup)[[symbol_col]]
   
   return(se_dedup)
@@ -195,6 +194,15 @@ write_se_to_gxpa <- function(se, output_dir, tpm_assay = "tpm", counts_assay = "
 
   # 1. Samples Metadata
   samples_df <- as.data.frame(SummarizedExperiment::colData(se))
+
+  # rename any existing '_id' column to avoid conflicts
+  if ("_id" %in% colnames(samples_df)) {
+    col_indices <- which(colnames(samples_df) == "_id")
+    new_names <- paste0("_id.", seq_along(col_indices))
+    colnames(samples_df)[col_indices] <- new_names
+    message("Renamed existing '_id' columns to '", paste(new_names, collapse = ", "), "' to avoid conflicts.")
+  }
+
   # Ensure _id is the first column
   samples_df <- data.frame(`_id` = colnames(se), samples_df, check.names = FALSE)
   samples_path <- file.path(output_dir, "expr.samples.csv")
